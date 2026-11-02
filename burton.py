@@ -128,9 +128,9 @@ def confirm_command(cmd, reason=""):
     print("Qué hará: ejecutará el comando en cmd.exe dentro de la carpeta de trabajo.")
     print(f"Comando: {cmd}")
     if reason:
-        print(f"Motivo indicado por el usuario: {reason[:500]}")
+        print(f"Explicación de Burton: {reason[:500]}")
     else:
-        print("Motivo: necesario para continuar la tarea solicitada.")
+        print("Explicación: Burton no indicó por qué hace falta este comando.")
     print("Riesgo: el comando puede modificar archivos o tener otros efectos.")
     return ask("¿Permites esta ejecución?")
 

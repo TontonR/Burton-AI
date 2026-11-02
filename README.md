@@ -114,11 +114,11 @@ contenido completo del fichero
 - `@read` limita a 200 líneas por lectura; el resto se pide con rangos.
 - El programa ejecuta solo la **primera** directiva de cada respuesta y descarta las demás, para que el modelo vea el resultado de `@read` antes de escribir. Por eso el prompt le pide una directiva por turno.
 - `@write` reescribe el fichero entero. El contenido va tal cual entre `@write` y `@endwrite`, sin vallas, así puede contener bloques ``` sin romper el parser. Antes de sobrescribir guarda una copia en `backups/`.
-- `@run` pide confirmación antes de ejecutar, mostrando comando y tarea solicitada; el modelo debe explicar previamente su efecto y motivo. Timeout de 120 s.
+- `@run` ejecuta comandos en la carpeta del proyecto y pide confirmación antes de cada ejecución, mostrando el comando y la explicación de Burton. Timeout de 120 s.
 - `@agent <tarea>` lanza un subagente de **solo lectura** con contexto propio: investiga con `@ls`/`@read` y devuelve un resumen. El padre no se llena con los ficheros que explora. No puede escribir ni ejecutar. Cada subagente se guarda en la sesión y puedes revisarlo con `/subagents` o `Ctrl+S`.
 - Las rutas siempre se resuelven dentro del proyecto.
 - Por defecto no se puede sobrescribir el código `.py` de `burton_ai`; `--allow-self-edit` lo permite.
-- `@write` solo se ejecuta si tu mensaje pide un cambio explícito; si solo pides información, se bloquea.
+- Peticiones claras como «hazme», «crea» o «implementa» autorizan a Burton a crear o editar archivos con `@write` sin pedir otro permiso. Las consultas, las instrucciones de solo lectura y las negaciones explícitas siguen bloqueadas.
 - Si el modelo repite una directiva, Burton no la ejecuta de nuevo: le recuerda el resultado anterior y le pide continuar. Si insiste otra vez, corta el bucle.
 
 ## Contexto

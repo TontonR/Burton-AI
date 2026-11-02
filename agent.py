@@ -15,8 +15,9 @@ API = "http://127.0.0.1:11434"
 WRITE_RE = re.compile(
     r"\b(escrib\w*|cre[ao]\w*|modific\w*|cambi\w*|arregl\w*|corrig\w*|corrij\w*|"
     r"a[ñn]ad\w*|agreg\w*|elimin\w*|borr\w*|renombr\w*|refactor\w*|implement\w*|"
-    r"actualiz\w*|guard\w*|hazlo|hazla|aplic\w*|write|edit|fix|create|add|remove|"
-    r"delete|update)\b",
+    r"actualiz\w*|guard\w*|hazme|hazlo|hazla|haz|constru\w*|program\w*|"
+    r"genera\w*|desarroll\w*|prepara\w*|monta\w*|aplic\w*|write|edit|fix|create|"
+    r"add|remove|delete|update|make\s+me|build\s+me)\b",
     re.IGNORECASE,
 )
 BLOCK_PHRASES = (
@@ -29,6 +30,9 @@ BLOCK_PHRASES = (
     "no cambies",
     "sin cambiar",
     "no toques",
+    "no hagas cambios",
+    "no hagas nada",
+    "no edites",
     "no crear",
     "no crees",
     "no borres",
@@ -51,6 +55,20 @@ def allows_writes(text):
     if any(phrase in lowered for phrase in BLOCK_PHRASES):
         return False
     return bool(WRITE_RE.search(lowered))
+
+
+def directive_explanation(text, directive_name):
+    directive_line = re.search(
+        rf"(?m)^\s*@{re.escape(directive_name)}\b", text, re.IGNORECASE
+    )
+    if not directive_line:
+        return ""
+    explanation = text[:directive_line.start()]
+    lines = [
+        re.sub(r"^\s*(?:[-*]\s+|\d+[.)]\s+)", "", line).strip()
+        for line in explanation.splitlines()
+    ]
+    return "\n".join(line for line in lines if line)[-500:]
 IGNORE = {
     ".git",
     ".venv",
@@ -158,7 +176,12 @@ def saludo():
 
 Reglas:
 - Si el usuario te da una tarea concreta o una lista de pasos, ejecútala con las directivas y herramientas disponibles; no respondas con instrucciones para que el usuario haga el trabajo, salvo que pida instrucciones.
+- Una petición como "hazme", "crea", "prepara" o "implementa" un programa o archivo autoriza a crearlo dentro del proyecto; no pidas permiso adicional para usar @write.
+- Si no indica nombre o ruta para un archivo nuevo, elige un nombre claro y créalo en la raíz del proyecto.
 - Si la tarea requiere inspeccionar, editar, probar o publicar el proyecto, no redactes el contenido solicitado como respuesta final: usa las directivas. Las modificaciones de archivos solo se aplican con @write y los comandos solo con @run.
+- @run ejecuta un comando de terminal en la carpeta del proyecto. Puedes usarlo para probar archivos creados, ejecutar tests y comprobar resultados; la aplicación pedirá permiso antes de ejecutarlo.
+- Antes de @run, escribe una explicación breve de qué hará el comando y por qué hace falta. Espera al resultado de @write antes de ejecutar el archivo que acabas de crear.
+- Si @write o @run devuelve un error, usa ese resultado para corregir la causa; no repitas el mismo comando sin cambios ni afirmes que una acción tuvo éxito si falló.
 - Tienes acceso REAL a los ficheros del proyecto con @ls y @read. Nunca digas que no puedes acceder o que están fuera del directorio.
 - Si el usuario nombra un fichero, responde con @read de ese fichero.
 - Si el usuario saluda o conversa, responde en texto normal, sin directivas ni @done. No explores ni modifiques nada sin una tarea.
@@ -167,7 +190,7 @@ Reglas:
 - Tras @read, usa el contenido real que recibes en @write. No inventes, resumas ni describas el contenido.
 - En @write copia el contenido sin los números de línea que añade @read.
 - No uses ``` para delimitar @write: empieza el contenido en la línea siguiente y ciérralo con @endwrite.
-- Lee con @read antes de reescribir un fichero.
+- Lee con @read antes de sobrescribir un fichero existente; si el fichero es nuevo, créalo directamente con @write.
 - No crees ni modifiques ficheros salvo que el usuario lo pida explícitamente. Si solo pide información, responde y termina; no "guardes" nada.
 - El resultado de @agent es información para responder, no contenido para @write.
 - @write reescribe el fichero entero: incluye todo el contenido, sin recortes.
@@ -507,14 +530,14 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
         key = (directive.name, directive.arg, directive.body)
         if key in seen:
             repeated_directives += 1
-            log(
-                ui.c(
-                    "  ! ya se ejecutó esa directiva en este turno; no la repetiré",
-                    ui.YELLOW,
-                )
-            )
             if repeated_directives > 1:
-                log(ui.c("  ! el modelo sigue repitiéndola; corto el bucle", ui.YELLOW))
+                repeated = f"@{directive.name} {directive.arg}".strip()
+                log(
+                    ui.c(
+                        f"  ! bucle detenido: el modelo repitió {repeated[:80]}",
+                        ui.YELLOW,
+                    )
+                )
                 return finish("loop")
             messages.append(
                 {
@@ -545,7 +568,14 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
                 "Responde con la información en texto y termina con @done."
             )
         else:
-            tools.confirm_reason = request_text
+            if directive.name == "run":
+                explanation = directive_explanation(text, "run")
+                tools.confirm_reason = explanation or (
+                    "Burton no explicó el motivo. Tarea original: "
+                    + request_text[:400]
+                )
+            else:
+                tools.confirm_reason = request_text
             result = tools.execute(directive)
 
         if result.startswith("ERROR"):

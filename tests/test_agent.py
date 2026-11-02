@@ -60,12 +60,22 @@ class WriteIntentTest(unittest.TestCase):
     def test_edit_request_allows_writes(self):
         self.assertTrue(agent.allows_writes("cambia 'adios' por 'hola' en a.txt"))
 
+    def test_creation_requests_allow_writes(self):
+        self.assertTrue(
+            agent.allows_writes(
+                "hazme un 3 en raya en Python que se juegue por terminal"
+            )
+        )
+        self.assertTrue(agent.allows_writes("haz un script que ordene una lista"))
+        self.assertTrue(agent.allows_writes("make me a Python game"))
+
     def test_question_blocks_writes(self):
         self.assertFalse(agent.allows_writes("dime qué contiene a.txt"))
 
     def test_explicit_negation_blocks_writes(self):
         self.assertFalse(agent.allows_writes("arregla a.txt pero no modifiques otros"))
         self.assertFalse(agent.allows_writes("solo dime qué contiene a.txt"))
+        self.assertFalse(agent.allows_writes("no hagas cambios, solo dime qué harías"))
 
     def test_response_format_negation_does_not_block_requested_edit(self):
         self.assertTrue(
@@ -208,6 +218,88 @@ class TurnTest(unittest.TestCase):
         self.assertEqual(outcome, "done")
         self.assertEqual(
             sum("-> @read a.txt" in entry for entry in self.logs), 1
+        )
+        self.assertFalse(any("bucle detenido" in entry for entry in self.logs))
+
+    def test_repeated_directive_loop_logs_only_one_concise_warning(self):
+        outcome, _ = self.run_turn(
+            ["@read a.txt", "@read a.txt", "@read a.txt", "@done"]
+        )
+        warnings = [entry for entry in self.logs if "bucle detenido" in entry]
+
+        self.assertEqual(outcome, "loop")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("@read a.txt", warnings[0])
+        self.assertFalse(any("ya se ejecutó esa directiva" in entry for entry in self.logs))
+        self.assertFalse(any("el modelo sigue repitiéndola" in entry for entry in self.logs))
+
+    def test_hazme_request_writes_requested_file(self):
+        session = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hazme un juego sencillo en Python para terminal",
+                }
+            ]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        responses = iter([
+            "@write juego.py\nprint('listo')\n@endwrite",
+            "@done",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(
+            (self.root / "juego.py").read_text(encoding="utf-8"),
+            "print('listo')\n",
+        )
+
+    def test_run_permission_uses_model_explanation(self):
+        session = {
+            "messages": [{"role": "user", "content": "comprueba el script"}]
+        }
+        permission_requests = []
+        tools = agent.Tools(
+            self.root,
+            confirm=lambda command, reason: (
+                permission_requests.append((command, reason)) or False
+            ),
+        )
+        responses = iter([
+            "Voy a ejecutar el test para comprobar que el script arranca.\n"
+            "@run python script.py",
+            "No se ejecutó porque se denegó el permiso.\n@done",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(
+            permission_requests,
+            [
+                (
+                    "python script.py",
+                    "Voy a ejecutar el test para comprobar que el script arranca.",
+                )
+            ],
         )
 
     def test_thinking_indicator_stops_before_first_chunk(self):
