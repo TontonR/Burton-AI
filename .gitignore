@@ -1,0 +1,14 @@
+config.json
+sessions/
+backups/
+history
+control/
+__pycache__/
+.pytest_cache/
+.venv/
+.venv*/
+venv/
+env/
+.env
+.env.*
+*.log

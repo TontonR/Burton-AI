@@ -1,0 +1,58 @@
+# Burton AI
+
+Burton es un agente de codigo local para proyectos. Usa Python, Ollama y un modelo que se ejecuta en tu equipo. Puede inspeccionar y editar archivos, ejecutar pruebas con permiso y mantener el historial de cada conversacion.
+
+## Requisitos
+
+- Windows y Python 3.12 o posterior.
+- Ollama instalado y en ejecucion.
+- Un modelo descargado en Ollama. El predeterminado es `qwen2.5-coder:14b`; puedes cambiarlo con `--model` o `/models`.
+
+## Instalacion y uso interactivo
+
+Desde la carpeta del proyecto Burton:
+
+```powershell
+py -3.12 -m pip install -r requirements.txt
+ollama pull qwen2.5-coder:14b
+py -3.12 .\burton.py --root .
+```
+
+La carpeta indicada por `--root` es el proyecto sobre el que trabajara el agente. Si omites `--root`, usa la carpeta actual. Para abrir Burton desde cualquier directorio, invoca `burton.py` con su ruta completa y pasa la carpeta de trabajo en `--root`.
+
+## Interfaz externa
+
+La interfaz externa permite enviar una tarea y consultar el mismo worker desde scripts u otros agentes. Ejecuta cada opcion en una invocacion separada y conserva la misma ruta de `--root`:
+
+```powershell
+py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --talk "Revisa los tests y corrige el fallo"
+py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --status
+py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --response
+py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --wait --timeout 120
+```
+
+- `--talk TEXTO` inicia el turno en segundo plano y devuelve JSON con su identificador.
+- `--status` devuelve JSON con el estado, el permiso pendiente y si el agente esta pensando.
+- `--response` devuelve el texto disponible hasta ese momento.
+- `--wait` espera a que acabe y devuelve la respuesta final; `--timeout` limita la espera.
+- `--stop` solicita detener el turno activo.
+- `--compact` resume el historial de la conversacion externa.
+- `--approve` o `--deny` resuelve un permiso pendiente solicitado por `@run`.
+- `--new` crea una sesion externa; `--toggle-plan` alterna el modo de solo lectura.
+- `--models [NOMBRE]`, `--sessions [ID|NUMERO]` y `--subagents [NUMERO]` consultan o seleccionan esos recursos.
+
+El agente no ejecuta comandos solicitados por el modelo sin aprobacion. Revisa el comando y su motivo antes de usar `--approve`.
+
+## Seguridad y datos locales
+
+Las directivas del modelo se limitan a la carpeta de trabajo. `@write` crea una copia de seguridad antes de reemplazar un archivo; la edicion del propio Burton esta bloqueada por defecto. Aun asi, revisa los cambios y los comandos antes de aprobarlos: un modelo local puede generar codigo incorrecto.
+
+La configuracion, sesiones, copias de seguridad, historial de terminal y estado del worker son datos locales y no deben publicarse.
+
+## Pruebas
+
+Desde la carpeta de Burton:
+
+```powershell
+py -3.12 -m unittest discover -s tests -v
+```
