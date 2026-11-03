@@ -89,6 +89,39 @@ class WriteIntentTest(unittest.TestCase):
             )
         )
 
+    def test_file_creation_request_is_detected(self):
+        self.assertTrue(agent.requests_file_creation("hazme un 3 en raya en Python"))
+        self.assertTrue(agent.requests_file_creation("crea el fichero"))
+        self.assertTrue(agent.requests_file_creation("create a game in Python"))
+        self.assertTrue(agent.requests_file_creation("make me a Python game"))
+        self.assertTrue(
+            agent.requests_file_creation("la directiva @write debes ejecutarla tú")
+        )
+
+    def test_extract_code_file_infers_filename_from_request(self):
+        self.assertEqual(
+            agent.extract_code_file(
+                "hazme un 3 en raya en Python",
+                "Aquí está:\n```python\nprint('juego')\n```",
+            ),
+            ("tres_en_raya.py", "print('juego')", "python"),
+        )
+        self.assertEqual(
+            agent.extract_code_file(
+                "hazme un juego sencillo en Python",
+                "```python\nprint('listo')\n```",
+            )[0],
+            "juego_sencillo.py",
+        )
+
+    def test_explicit_no_create_request_is_not_detected(self):
+        self.assertFalse(
+            agent.requests_file_creation(
+                "NO CREES EL TRES EN RAYA; ES PARA PONERLA A PRUEBA"
+            )
+        )
+        self.assertFalse(agent.requests_file_creation("Do not create a game"))
+
 
 class StreamChatTest(unittest.TestCase):
     def test_sends_unlimited_prediction_limit_to_ollama(self):
@@ -168,10 +201,32 @@ class TurnTest(unittest.TestCase):
         self.assertEqual(outcome, "done")
         self.assertTrue(
             any(
-                "No repitas la directiva" in message["content"]
+                "Do not repeat the directive" in message["content"]
                 for message in session["messages"]
             )
         )
+
+    def test_skills_directive_activates_skill_for_next_step(self):
+        prompts = []
+        responses = iter(["@skills git", "@done"])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            prompts.append(messages[0]["content"])
+            return next(responses), {"tokens": 1, "seconds": 0.1}
+
+        session = {"messages": [{"role": "user", "content": "prepara el repo"}]}
+        tools = agent.Tools(self.root, confirm=lambda cmd, reason: False)
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("@skills <id,id>", prompts[0])
+        self.assertIn("- git:", prompts[0])
+        self.assertIn("Never run `git reset --hard`", prompts[1])
+        self.assertNotIn("skills", self.cfg)
 
     def test_text_reply_ends_turn(self):
         outcome, _ = self.run_turn(["Tiene una línea."])
@@ -210,7 +265,7 @@ class TurnTest(unittest.TestCase):
             agent.run_turn(
                 session, self.cfg, tools, lambda piece: None, log=self.logs.append
             )
-        self.assertIn("Contexto: 4,000/16,384 tokens (24.4%", self.logs[-1])
+        self.assertIn("Context: 4,000/16,384 tokens (24.4%", self.logs[-1])
         self.assertEqual(session["last_context_tokens"], 4000)
 
     def test_duplicate_directive_is_not_executed_twice(self):
@@ -219,13 +274,13 @@ class TurnTest(unittest.TestCase):
         self.assertEqual(
             sum("-> @read a.txt" in entry for entry in self.logs), 1
         )
-        self.assertFalse(any("bucle detenido" in entry for entry in self.logs))
+        self.assertFalse(any("loop stopped" in entry for entry in self.logs))
 
     def test_repeated_directive_loop_logs_only_one_concise_warning(self):
         outcome, _ = self.run_turn(
             ["@read a.txt", "@read a.txt", "@read a.txt", "@done"]
         )
-        warnings = [entry for entry in self.logs if "bucle detenido" in entry]
+        warnings = [entry for entry in self.logs if "loop stopped" in entry]
 
         self.assertEqual(outcome, "loop")
         self.assertEqual(len(warnings), 1)
@@ -246,6 +301,7 @@ class TurnTest(unittest.TestCase):
         responses = iter([
             "@write juego.py\nprint('listo')\n@endwrite",
             "@done",
+            "@done",
         ])
 
         def fake_chat(model, messages, cfg, on_chunk):
@@ -264,6 +320,222 @@ class TurnTest(unittest.TestCase):
             "print('listo')\n",
         )
 
+    def test_file_creation_directive_does_not_trigger_false_retry_after_write(self):
+        session = {
+            "messages": [
+                {"role": "user", "content": "hazme un juego sencillo en Python"}
+            ]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        responses = iter([
+            "@write juego.py\nprint('listo')\n@endwrite",
+            "El archivo ya está creado.",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "text")
+        self.assertTrue((self.root / "juego.py").exists())
+        self.assertFalse(
+            any("You have not modified any file yet" in item["content"]
+                for item in session["messages"] if item["role"] == "user")
+        )
+        self.assertFalse(any("file was not created" in item for item in self.logs))
+
+    def test_file_creation_code_block_is_saved_and_streamed(self):
+        session = {
+            "messages": [
+                {"role": "user", "content": "hazme un juego sencillo en Python"}
+            ]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        responses = iter([
+            "Aquí tienes el código:\n```python\nprint('listo')\n```",
+            "@done",
+            "@done",
+        ])
+        shown = []
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, shown.append, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(
+            (self.root / "juego_sencillo.py").read_text(encoding="utf-8"),
+            "print('listo')\n",
+        )
+        self.assertTrue(shown)
+        self.assertTrue(any("wrote juego_sencillo.py" in entry for entry in self.logs))
+
+    def test_file_creation_retry_saves_code_block_after_empty_block(self):
+        session = {
+            "messages": [
+                {"role": "user", "content": "hazme un juego sencillo en Python"}
+            ]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        responses = iter([
+            "Aquí tienes el código:\n```python\n\n```\nPuedo guardarlo.",
+            "Código:\n```python\nprint('listo')\n```",
+            "@done",
+            "@done",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(
+            (self.root / "juego_sencillo.py").read_text(encoding="utf-8"),
+            "print('listo')\n",
+        )
+        self.assertTrue(any("wrote juego_sencillo.py" in entry for entry in self.logs))
+
+    def test_auto_syntax_check_after_python_write(self):
+        session = {
+            "messages": [{"role": "user", "content": "hazme un juego en Python"}]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        responses = iter([
+            "@write juego.py\nprint('listo')\n@endwrite",
+            "@done",
+            "@done",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertTrue(any("syntax ok" in entry for entry in self.logs))
+        self.assertTrue(
+            any(
+                "Auto syntax check" in item["content"]
+                for item in session["messages"]
+                if item["role"] == "user"
+            )
+        )
+
+    def test_done_asks_for_one_self_review_after_python_write(self):
+        session = {
+            "messages": [{"role": "user", "content": "hazme un juego en Python"}]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        seen = []
+        responses = iter([
+            "@write juego.py\nprint('listo')\n@endwrite",
+            "@done",
+            "@done",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            seen.append([item["content"] for item in messages])
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(any("Before you finish, review your work" in text for text in seen[2]))
+        self.assertTrue(any("self-review before done" in entry for entry in self.logs))
+
+    def test_model_run_after_write_skips_the_review_nudge(self):
+        session = {
+            "messages": [{"role": "user", "content": "hazme un juego en Python"}]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        responses = iter([
+            "@write juego.py\nprint('listo')\n@endwrite",
+            "@run python juego.py",
+            "@done",
+        ])
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            text = next(responses)
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "done")
+        self.assertFalse(any("self-review before done" in entry for entry in self.logs))
+
+    def test_code_fallback_does_not_overwrite_existing_file(self):
+        (self.root / "juego.py").write_text("original\n", encoding="utf-8")
+        extracted = agent.write_code_file(
+            "hazme un juego en Python",
+            "```python\nprint('nuevo')\n```",
+            agent.Tools(self.root),
+        )
+
+        self.assertIsNone(extracted)
+        self.assertEqual(
+            (self.root / "juego.py").read_text(encoding="utf-8"), "original\n"
+        )
+
+    def test_no_create_request_never_retries_or_writes(self):
+        session = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "NO CREES EL TRES EN RAYA; ES PARA PONERLA A PRUEBA",
+                }
+            ]
+        }
+        tools = agent.Tools(self.root, confirm=lambda _cmd, _reason: False)
+        calls = []
+
+        def fake_chat(model, messages, cfg, on_chunk):
+            calls.append(messages)
+            text = "Entendido, no crearé el juego."
+            on_chunk(text)
+            return text, {"tokens": 1, "seconds": 0.1}
+
+        with mock.patch.object(agent, "stream_chat", fake_chat):
+            outcome = agent.run_turn(
+                session, self.cfg, tools, lambda _piece: None, log=self.logs.append
+            )
+
+        self.assertEqual(outcome, "text")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse((self.root / "juego.py").exists())
+
     def test_run_permission_uses_model_explanation(self):
         session = {
             "messages": [{"role": "user", "content": "comprueba el script"}]
@@ -277,7 +549,7 @@ class TurnTest(unittest.TestCase):
         )
         responses = iter([
             "Voy a ejecutar el test para comprobar que el script arranca.\n"
-            "@run python script.py",
+            "@run npm install left-pad",
             "No se ejecutó porque se denegó el permiso.\n@done",
         ])
 
@@ -296,7 +568,7 @@ class TurnTest(unittest.TestCase):
             permission_requests,
             [
                 (
-                    "python script.py",
+                    "npm install left-pad",
                     "Voy a ejecutar el test para comprobar que el script arranca.",
                 )
             ],
@@ -347,15 +619,15 @@ class TurnTest(unittest.TestCase):
         )
         self.assertEqual(outcome, "done")
         self.assertTrue(
-            any("No estás fuera del proyecto" in m["content"] for m in session["messages"])
+            any("You are not outside the project" in m["content"] for m in session["messages"])
         )
 
     def test_skills_are_loaded(self):
-        prompt = agent.build_system_prompt(self.root)
-        self.assertIn("Leer ficheros", prompt)
+        prompt = agent.build_system_prompt(self.root, self.cfg)
+        self.assertIn("Project skills", prompt)
+        self.assertIn("Real file access", prompt)
+        self.assertIn("one directive", prompt.lower())
         self.assertIn("prompt.md", prompt)
-        self.assertIn("no respondas con instrucciones", prompt)
-        self.assertIn("Las modificaciones de archivos solo se aplican con @write", prompt)
 
     def test_compact_replaces_history_only_after_summary(self):
         session = {"messages": [{"role": "user", "content": "tarea"}]}

@@ -9,15 +9,16 @@ import store
 import ui
 
 COMMANDS = {
-    "/new": "nueva conversación",
-    "/clear": "nueva conversación (alias)",
-    "/plan": "alternar solo lectura",
-    "/models": "cambiar de modelo",
-    "/sessions": "listar o cargar sesiones",
-    "/subagents": "ver subagentes de esta sesión",
-    "/compact": "resumir el historial",
-    "/help": "ayuda",
-    "/exit": "salir",
+    "/new": "new conversation",
+    "/clear": "new conversation (alias)",
+    "/plan": "toggle read-only mode",
+    "/models": "switch model",
+    "/sessions": "list or load sessions",
+    "/skills": "list, enable or disable skills",
+    "/subagents": "view this session's subagents",
+    "/compact": "summarise the history",
+    "/help": "help",
+    "/exit": "quit",
 }
 
 DRAFT = {"text": ""}
@@ -79,8 +80,8 @@ def make_bindings():
     except ValueError:
         pass
 
-    # Windows Terminal manda Ctrl+Backspace como ^W (c-w). Por defecto solo
-    # borra la selección, así que aquí lo hacemos borrar la palabra anterior.
+    # Windows Terminal sends Ctrl+Backspace as ^W. By default that only
+    # deletes the selection, so here it deletes the previous word.
     bindings.add("c-w")(get_by_name("backward-kill-word"))
     bindings.add("c-delete")(get_by_name("kill-word"))
 
@@ -88,7 +89,6 @@ def make_bindings():
     def _subagents(event):
         DRAFT["text"] = event.current_buffer.text
         event.app.exit(result=ui.SUBAGENTS_KEY)
-
     return bindings
 
 

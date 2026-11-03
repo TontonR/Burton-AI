@@ -4,12 +4,14 @@ import platform
 import re
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import ui
-from tools import Tools, parse_directives, truncate
+import skills
+from tools import Directive, ToolError, Tools, parse_directives, resolve, truncate
 
 API = "http://127.0.0.1:11434"
 WRITE_RE = re.compile(
@@ -19,6 +21,39 @@ WRITE_RE = re.compile(
     r"genera\w*|desarroll\w*|prepara\w*|monta\w*|aplic\w*|write|edit|fix|create|"
     r"add|remove|delete|update|make\s+me|build\s+me)\b",
     re.IGNORECASE,
+)
+CODE_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
+CODE_EXTENSIONS = {
+    "python": "py",
+    "py": "py",
+    "javascript": "js",
+    "js": "js",
+    "typescript": "ts",
+    "ts": "ts",
+    "bash": "sh",
+    "sh": "sh",
+    "powershell": "ps1",
+    "ps1": "ps1",
+    "json": "json",
+    "yaml": "yaml",
+    "yml": "yml",
+    "html": "html",
+    "css": "css",
+    "sql": "sql",
+    "java": "java",
+    "c": "c",
+    "cpp": "cpp",
+    "c++": "cpp",
+    "rust": "rs",
+    "go": "go",
+}
+FILE_CREATION_RE = re.compile(
+    r"@write\b|\b(?:crea\w*|escrib\w*|genera\w*|hazme|implementa\w*|"
+    r"create|make\s+me|build\s+me|"
+    r"programa\w*|desarrolla\w*)\b.{0,120}\b(?:archivo|fichero|programa|"
+    r"script|juego|aplicaci[oó]n|m[oó]dulo|clase|funci[oó]n|"
+    r"\d+\s+en\s+raya|tres\s+en\s+raya|python|file|program|script|game|app)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 BLOCK_PHRASES = (
     "no modifiques",
@@ -42,6 +77,14 @@ BLOCK_PHRASES = (
     "solo leer",
     "sólo leer",
     "solo informa",
+    "do not create",
+    "don't create",
+    "do not write",
+    "don't write",
+    "do not modify",
+    "don't modify",
+    "only tell me",
+    "read only",
 )
 RESPONSE_ONLY_RE = re.compile(
     r"\bno\s+(?:escribas?|devuelvas?|respondas?)\b[^\n.!?]*"
@@ -55,6 +98,64 @@ def allows_writes(text):
     if any(phrase in lowered for phrase in BLOCK_PHRASES):
         return False
     return bool(WRITE_RE.search(lowered))
+
+
+def requests_file_creation(text):
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in BLOCK_PHRASES):
+        return False
+    return bool(FILE_CREATION_RE.search(text))
+
+
+def extract_code_file(request_text, response_text):
+    match = CODE_BLOCK_RE.search(response_text)
+    if not match or not match.group(2).strip():
+        return None
+    language = match.group(1).lower()
+    extension = CODE_EXTENSIONS.get(language)
+    if extension is None:
+        return None
+
+    before_code = response_text[:match.start()]
+    for source in (request_text, before_code):
+        target = FILE_RE.search(source)
+        if target:
+            return target.group(0).rstrip(".,;:!?"), match.group(2).rstrip(), language
+
+    normalized = unicodedata.normalize("NFKD", request_text.lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    if re.search(r"\b(?:3|tres)\s+en\s+raya\b", normalized):
+        stem = "tres_en_raya"
+    else:
+        subject = re.search(
+            r"\b(?:hazme|crea\w*|genera\w*|implementa\w*|programa\w*|"
+            r"create|make\s+me|build\s+me)\s+(?:a\s+|an?\s+|un\s+|una\s+|"
+            r"el\s+|la\s+)?(.{1,50}?)\s+(?:in\s+(?:python|javascript|"
+            r"typescript)|en\s+(?:python|javascript|typescript)|for\s+"
+            r"(?:terminal|console)|para\s+(?:terminal|consola)|por\s+terminal)\b",
+            normalized,
+        )
+        stem = subject.group(1) if subject else "nuevo_archivo"
+        stem = re.sub(r"\b(?:un|una|el|la|programa|archivo|fichero)\b", " ", stem)
+        stem = re.sub(r"[^a-z0-9]+", "_", stem).strip("_") or "nuevo_archivo"
+    return f"{stem}.{extension}", match.group(2).rstrip(), language
+
+
+def write_code_file(request_text, response_text, tools):
+    extracted = extract_code_file(request_text, response_text)
+    if extracted is None:
+        return None
+    path, body, _language = extracted
+    try:
+        destination = resolve(tools.root, path)
+        if destination.exists():
+            return None
+    except (OSError, ValueError, ToolError):
+        return None
+    result = tools.execute(Directive("write", path, body))
+    if result.startswith("ERROR"):
+        return None
+    return path, body, result
 
 
 def directive_explanation(text, directive_name):
@@ -78,31 +179,17 @@ IGNORE = {
     ".pytest_cache",
 }
 
-SKILLS_DIR = Path(__file__).resolve().parent / "skills"
-MAX_SKILLS_CHARS = 4000
 REFUSAL_RE = re.compile(
-    r"no (?:puedo|tengo) (?:acceder|leer|ejecutar)|fuera del directorio|"
-    r"no tengo acceso|no puedo ver (?:el|los) (?:archivo|fichero)",
+    r"no (?:puedo|tengo) (?:acceder|leer|abrir|ejecutar)|fuera del directorio|"
+    r"no tengo acceso|no puedo ver (?:el|los) (?:archivo|fichero)|"
+    r"i (?:can't|cannot|am unable to) (?:access|read|open|see)|"
+    r"outside (?:the )?(?:project|directory|workspace)|i don't have access",
     re.IGNORECASE,
 )
 FILE_RE = re.compile(
     r"\b[\w./\\-]+\.(?:md|py|txt|json|toml|ya?ml|js|ts|jsx|tsx|css|html|sh|ps1|cfg|ini)\b",
     re.IGNORECASE,
 )
-
-
-def load_skills(limit=MAX_SKILLS_CHARS):
-    if not SKILLS_DIR.is_dir():
-        return ""
-    parts = []
-    for path in sorted(SKILLS_DIR.glob("*.md")):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            continue
-        if text:
-            parts.append(text)
-    return "\n\n".join(parts)[:limit]
 
 
 def api_get(path, timeout=10):
@@ -127,10 +214,10 @@ def file_tree(root, max_entries=80, max_depth=3):
             lines.append(f"{'  ' * (depth - 1)}{rel.name}/")
         for name in sorted(filenames):
             if len(lines) >= max_entries:
-                lines.append("... (árbol recortado)")
+                lines.append("... (tree truncated)")
                 return "\n".join(lines)
             lines.append(f"{indent}{name}")
-    return "\n".join(lines) or "(proyecto vacío)"
+    return "\n".join(lines) or "(empty project)"
 
 
 def project_notes(root):
@@ -143,65 +230,63 @@ def project_notes(root):
         return ""
     if not text:
         return ""
-    return "\n\nInstrucciones del proyecto (AGENTS.md):\n" + text[:2000]
+    return "\n\nProject instructions (AGENTS.md):\n" + text[:2000]
 
 
-def build_system_prompt(root, plan=False):
-    skills = load_skills()
-    skills_note = f"\nHabilidades permanentes:\n{skills}\n" if skills else ""
+def build_system_prompt(root, cfg, plan=False):
+    skill_text = skills.load_text(cfg)
+    skills_note = f"\nProject skills:\n{skill_text}\n" if skill_text else ""
+    auto_note = ""
+    auto_line = ""
+    auto_rule = ""
+    if skills.is_active(cfg, "auto-skills"):
+        auto_line = "@skills <id,id>\n"
+        auto_rule = (
+            "- If the task needs an optional skill that is not [active], send "
+            "`@skills id` as your first response.\n"
+        )
+        auto_note = (
+            "\nOptional skills (activate with @skills id,id):\n"
+            + skills.catalog(cfg)
+            + "\n"
+        )
     plan_note = ""
     if plan:
         plan_note = (
-            "MODO PLAN ACTIVO: solo puedes usar @ls y @read. No escribas ni ejecutes nada. "
-            "Entrega tu plan y termina con @done.\n"
+            "PLAN MODE: use only @ls and @read. Do not write or run anything. "
+            "Deliver the plan and finish with @done.\n"
         )
-    return f"""Eres un agente de código en {root}.
-Entorno: {platform.system()} · shell: {'cmd.exe' if os.name == 'nt' else 'sh'} · Python {platform.python_version()}
+    shell = "cmd.exe" if os.name == "nt" else "sh"
+    return f"""You are a coding agent working in {root}.
+Environment: {platform.system()} · shell: {shell} · Python {platform.python_version()}
 
-Directivas, una por línea:
-@ls <ruta>
-@read <ruta> [inicio-fin]
-@write <ruta>
-contenido COMPLETO del fichero, tal cual, sin vallas de código
+Directives, one per line:
+@ls <path>
+@read <path> [start-end]
+{auto_line}@write <path>
+FULL file content, raw, no code fences
 @endwrite
-@run <comando>
-@agent <tarea>
+@run <command>
+@agent <task>
 @done
 
-Ejemplo de @write:
-@write saludo.py
-def saludo():
-    return "hola"
+@write example:
+@write hello.py
+def hello():
+    return "hi"
 @endwrite
 
-Reglas:
-- Si el usuario te da una tarea concreta o una lista de pasos, ejecútala con las directivas y herramientas disponibles; no respondas con instrucciones para que el usuario haga el trabajo, salvo que pida instrucciones.
-- Una petición como "hazme", "crea", "prepara" o "implementa" un programa o archivo autoriza a crearlo dentro del proyecto; no pidas permiso adicional para usar @write.
-- Si no indica nombre o ruta para un archivo nuevo, elige un nombre claro y créalo en la raíz del proyecto.
-- Si la tarea requiere inspeccionar, editar, probar o publicar el proyecto, no redactes el contenido solicitado como respuesta final: usa las directivas. Las modificaciones de archivos solo se aplican con @write y los comandos solo con @run.
-- @run ejecuta un comando de terminal en la carpeta del proyecto. Puedes usarlo para probar archivos creados, ejecutar tests y comprobar resultados; la aplicación pedirá permiso antes de ejecutarlo.
-- Antes de @run, escribe una explicación breve de qué hará el comando y por qué hace falta. Espera al resultado de @write antes de ejecutar el archivo que acabas de crear.
-- Si @write o @run devuelve un error, usa ese resultado para corregir la causa; no repitas el mismo comando sin cambios ni afirmes que una acción tuvo éxito si falló.
-- Tienes acceso REAL a los ficheros del proyecto con @ls y @read. Nunca digas que no puedes acceder o que están fuera del directorio.
-- Si el usuario nombra un fichero, responde con @read de ese fichero.
-- Si el usuario saluda o conversa, responde en texto normal, sin directivas ni @done. No explores ni modifiques nada sin una tarea.
-- Escribe UNA sola directiva por respuesta y espera su resultado antes de la siguiente.
-- Usa rutas relativas al proyecto, nunca absolutas.
-- Tras @read, usa el contenido real que recibes en @write. No inventes, resumas ni describas el contenido.
-- En @write copia el contenido sin los números de línea que añade @read.
-- No uses ``` para delimitar @write: empieza el contenido en la línea siguiente y ciérralo con @endwrite.
-- Lee con @read antes de sobrescribir un fichero existente; si el fichero es nuevo, créalo directamente con @write.
-- No crees ni modifiques ficheros salvo que el usuario lo pida explícitamente. Si solo pide información, responde y termina; no "guardes" nada.
-- El resultado de @agent es información para responder, no contenido para @write.
-- @write reescribe el fichero entero: incluye todo el contenido, sin recortes.
-- Antes de @run, explica en una frase qué hará el comando y por qué es necesario; después espera la confirmación interactiva del usuario.
-- Usa @run para tests, builds y comandos.
-- Usa @agent para delegar una investigación de solo lectura; el subagente no puede escribir ni ejecutar.
-- No expliques lo que vas a hacer; hazlo. Respuestas cortas y en español.
-- Si el usuario pide información, escribe la respuesta en texto claro (sin directivas) antes de @done.
-- Si ya has terminado, escribe solo @done.
-{skills_note}{plan_note}{project_notes(root)}
-Árbol del proyecto:
+Rules:
+- Execute the task with directives. Never ask the user to run them.
+- Emit ONE directive per response and wait for its result.
+- Use paths relative to the project root, never absolute paths.
+- Never claim a file was written or a command succeeded without its result.
+- If the user only asks for information, answer in text and do not modify files.
+- If the user greets or chats, answer in text without directives.
+- Use @agent only for read-only research.
+{auto_rule}- When finished, write @done on its own line after any final answer.
+{skills_note}{auto_note}{plan_note}{project_notes(root)}
+Project tree:
 {file_tree(root)}"""
 
 
@@ -268,7 +353,7 @@ def stream_chat(model, messages, cfg, on_chunk, cancel_event=None):
             pass
         else:
             raise RuntimeError(
-                f"no puedo conectar con Ollama en {API} ({exc.reason}). ¿Está arrancado?"
+                f"cannot connect to Ollama at {API} ({exc.reason}). Is it running?"
             ) from None
     except (OSError, ValueError, AttributeError):
         if cancel_event is None or not cancel_event.is_set():
@@ -317,7 +402,7 @@ def trim_history(messages, budget):
 def compact_session(session, cfg, cancel_event=None):
     messages = session.get("messages", [])
     if not messages:
-        return False, "No hay conversación que compactar.", None
+        return False, "There is no conversation to compact.", None
 
     transcript = "\n\n".join(
         f"{message['role'].upper()}:\n{message['content']}" for message in messages
@@ -340,11 +425,11 @@ def compact_session(session, cfg, cancel_event=None):
         {
             "role": "system",
             "content": (
-                "Resume el historial como memoria de trabajo para continuar la misma "
-                "conversación. Conserva el objetivo original, requisitos y restricciones, "
-                "hechos verificados, decisiones, archivos/cambios realizados, errores "
-                "pendientes y siguiente paso. No inventes ni ejecutes acciones. Sé "
-                "conciso pero suficiente; devuelve solo el resumen."
+                "Summarise the history as working memory to continue the same "
+                "conversation. Keep the original goal, requirements and constraints, "
+                "verified facts, decisions, files/changes made, pending errors and the "
+                "next step. Do not invent or execute actions. Be concise but complete; "
+                "return only the summary."
             ),
         },
         {"role": "user", "content": transcript},
@@ -358,14 +443,14 @@ def compact_session(session, cfg, cancel_event=None):
             cancel_event,
         )
     except RuntimeError as exc:
-        return False, f"No se compactó la conversación: {exc}", None
+        return False, f"Conversation was not compacted: {exc}", None
     if not summary.strip():
-        return False, "El modelo devolvió un resumen vacío; conservé el historial.", None
+        return False, "The model returned an empty summary; history was kept.", None
 
     session["messages"] = [
         {
             "role": "user",
-            "content": "Resumen compacto de la conversación anterior:\n\n"
+            "content": "Compact summary of the previous conversation:\n\n"
             + summary.strip(),
         }
     ]
@@ -379,75 +464,81 @@ def clean_answer(text):
     return "\n".join(lines).strip()
 
 
-def build_subagent_prompt(root):
-    skills = load_skills()
-    skills_note = f"\nHabilidades permanentes:\n{skills}\n" if skills else ""
-    return f"""Eres un subagente de solo lectura en {root}.
-Investiga lo que te pide el usuario y devuelve una respuesta breve y concreta.
+def build_subagent_prompt(root, cfg):
+    skill_text = skills.load_text(cfg)
+    skills_note = f"\nProject skills:\n{skill_text}\n" if skill_text else ""
+    return f"""You are a read-only subagent working in {root}.
+Research the task and return a short, concrete answer.
 
-Directivas permitidas, una por línea:
-@ls <ruta>
-@read <ruta> [inicio-fin]
+Allowed directives, one per line:
+@ls <path>
+@read <path> [start-end]
 @done
 
-Reglas:
-- Tienes acceso real a los ficheros con @ls y @read. Nunca digas que no puedes acceder.
-- Escribe UNA sola directiva por respuesta y espera el resultado.
-- No modifiques ficheros ni ejecutes comandos.
-- Cuando ya tengas la respuesta, escríbela en texto normal sin directivas y sin los números de línea de @read.
-- Responde en español.
+Rules:
+- You have real file access with @ls and @read. Never claim otherwise.
+- Emit ONE directive per response and wait for its result.
+- Do not modify files or run commands.
+- When you have the answer, write it as plain text without directives and without @read line numbers.
 {skills_note}{project_notes(root)}
-Árbol del proyecto:
+Project tree:
 {file_tree(root)}"""
 
 
 def run_subagent(task, cfg, root, log=print, record=None, cancel_event=None):
     if not task.strip():
-        return "ERROR: falta la tarea del subagente"
+        return "ERROR: missing subagent task"
     tools = Tools(root, plan=True)
     messages = [{"role": "user", "content": task}]
     last = ""
     for _ in range(min(6, cfg["max_steps"])):
         if cancel_event is not None and cancel_event.is_set():
-            return last or "[interrumpido]"
+            return last or "[interrupted]"
         context = [
-            {"role": "system", "content": build_subagent_prompt(root)}
+            {"role": "system", "content": build_subagent_prompt(root, cfg)}
         ] + trim_history(messages, cfg["num_ctx"] * 2)
         try:
             text, _ = stream_with_indicator(
                 cfg["model"], context, cfg, lambda piece: None, cancel_event
             )
         except RuntimeError as exc:
-            return f"ERROR del subagente: {exc}"
+            return f"ERROR from subagent: {exc}"
         messages.append({"role": "assistant", "content": text})
         answer = clean_answer(text)
         if answer:
             last = answer
         directives = parse_directives(text)
         if not directives:
-            return answer or "(sin respuesta)"
+            return answer or "(no answer)"
         if directives[0].name == "done":
-            return answer or last or "(sin respuesta)"
+            return answer or last or "(no answer)"
         directive = directives[0]
         result = tools.execute(directive)
         step = f"@{directive.name} {directive.arg}".strip()
-        log(ui.c(f"     subagente: {step}"[:120], ui.DIM))
+        log(ui.c(f"     subagent: {step}"[:120], ui.DIM))
         if record is not None:
             record.setdefault("steps", []).append(step[:200])
         messages.append(
             {
                 "role": "user",
-                "content": f"Resultado de @{directive.name} {directive.arg}:\n{result}",
+                "content": f"Result of @{directive.name} {directive.arg}:\n{result}",
             }
         )
-    return (last or "(sin respuesta)") + "\n[subagente: límite de pasos]"
+    return (last or "(no answer)") + "\n[subagent: step limit]"
 
 
 def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
     messages = session["messages"]
     request_text = messages[-1]["content"] if messages else ""
+    turn_cfg = dict(cfg)
     write_ok = allows_writes(request_text)
+    hide_generation = write_ok and requests_file_creation(request_text)
     retried = False
+    file_creation_retry = False
+    file_created = False
+    written_python = []
+    model_ran = False
+    review_asked = False
     started = time.perf_counter()
     tokens = 0
     gen_seconds = 0.0
@@ -460,7 +551,11 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
             parts.append(f"{tokens} tok")
         if gen_seconds:
             parts.append(f"{tokens / gen_seconds:.0f} tok/s")
-        log(ui.c("  " + ui.glyph("✓", "ok") + " " + " · ".join(parts), ui.DIM))
+        log(
+            ui.c("  " + ui.glyph("✓", "ok"), ui.GREEN)
+            + " "
+            + ui.c(" · ".join(parts), ui.DIM)
+        )
         if prompt_tokens:
             limit = cfg["num_ctx"]
             percent = prompt_tokens * 100 / limit
@@ -468,27 +563,50 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
             session["last_context_limit"] = limit
             log(
                 ui.c(
-                    f"  Contexto: {prompt_tokens:,}/{limit:,} tokens "
-                    f"({percent:.1f}%; medición de Ollama)",
-                    ui.DIM,
+                    f"  Context: {prompt_tokens:,}/{limit:,} tokens "
+                    f"({percent:.1f}%; Ollama measurement)",
+                    ui.CYAN,
                 )
             )
         return outcome
+
+    def syntax_check(rel):
+        """Auto-run py_compile after a Python file is written."""
+        log(
+            "  "
+            + ui.c("->", ui.MAGENTA)
+            + " "
+            + ui.c("@run", ui.BOLD, ui.CYAN)
+            + " "
+            + ui.c(f"python -m py_compile {rel}", ui.DIM)
+        )
+        output = tools.execute(Directive("run", f'python -m py_compile "{rel}"'))
+        if "exit 0" in output:
+            log(ui.c("     syntax ok", ui.GREEN))
+        else:
+            log(ui.c("     syntax error", ui.RED))
+            for line in output.splitlines()[:20]:
+                log(ui.c(f"     {line}", ui.RED))
+        return output
 
     seen = set()
     repeated_directives = 0
 
     for step in range(cfg["max_steps"]):
         if cancel_event is not None and cancel_event.is_set():
-            log(ui.c("  [interrumpido]", ui.YELLOW))
+            log(ui.c("  [interrupted]", ui.YELLOW))
             return finish("cancelled")
         if step:
             log("")
-        system = {"role": "system", "content": build_system_prompt(tools.root, tools.plan)}
+        system = {"role": "system", "content": build_system_prompt(tools.root, turn_cfg, tools.plan)}
         context = [system] + trim_history(messages, cfg["num_ctx"] * 3)
         try:
             text, stats = stream_with_indicator(
-                cfg["model"], context, cfg, on_chunk, cancel_event
+                cfg["model"],
+                context,
+                cfg,
+                on_chunk,
+                cancel_event,
             )
         except RuntimeError as exc:
             log(ui.c(f"\n  ! {exc}", ui.RED))
@@ -502,7 +620,7 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
         messages.append({"role": "assistant", "content": text})
         log("")
         if cancel_event is not None and cancel_event.is_set():
-            log(ui.c("  [interrumpido]", ui.YELLOW))
+            log(ui.c("  [interrupted]", ui.YELLOW))
             return finish("cancelled")
 
         directives = parse_directives(text)
@@ -510,21 +628,90 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
             target = FILE_RE.search(request_text)
             if not retried and target and REFUSAL_RE.search(text):
                 retried = True
-                log(ui.c("  ! el modelo se ha bloqueado; le recuerdo que puede leer", ui.YELLOW))
+                log(ui.c("  ! the model refused; reminding it that it can read", ui.YELLOW))
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            f"No estás fuera del proyecto: la raíz es {tools.root} y tienes acceso real. "
-                            f"Responde SOLO con la directiva necesaria, por ejemplo: @read {target.group(0)}"
+                            f"You are not outside the project: the root is {tools.root} and you have real access. "
+                            f"Reply with ONLY the needed directive, for example: @read {target.group(0)}"
                         ),
                     }
                 )
                 continue
+            if hide_generation:
+                if not file_created:
+                    written = write_code_file(request_text, text, tools)
+                    if written is not None:
+                        path, body, result = written
+                        file_created = True
+                        file_creation_retry = True
+                        log(ui.c(f"  -> @write {path}", ui.DIM))
+                        log(ui.c(f"     {result}", ui.GREEN))
+                        seen.add(("write", path, body))
+                        check = ""
+                        if path.lower().endswith(".py"):
+                            written_python.append(path)
+                            check = "\nAuto syntax check:\n" + syntax_check(path)
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Result of @write {path}:\n{result}{check}\n"
+                                    "The previous code block was already saved. Do not show it "
+                                    "or write it again. If it needs testing, propose a suitable "
+                                    "@run command."
+                                ),
+                            }
+                        )
+                        continue
+                if not file_creation_retry:
+                    file_creation_retry = True
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "You have not modified any file yet. Use a single @write "
+                                "directive with a suitable filename and the full content. "
+                                "If you already proposed code, turn it into the @write body; "
+                                "do not show it again as the answer. Wait for the real result "
+                                "and never claim the file exists before it is confirmed."
+                            ),
+                        }
+                    )
+                    continue
+                if not file_created:
+                    log(
+                        ui.c(
+                            "  ! no directive was executed; the file was not created",
+                            ui.YELLOW,
+                        )
+                    )
             return finish("text")
 
         directive = directives[0]
         if directive.name == "done":
+            if written_python and not model_ran and not review_asked:
+                review_asked = True
+                files = ", ".join(written_python[-3:])
+                log(ui.c("  ! self-review before done", ui.YELLOW))
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Before you finish, review your work against the original "
+                            f"request:\n{request_text[:600]}\n"
+                            f"Files written: {files}\n"
+                            "Check every requirement, trace the real behaviour step by "
+                            "step, and look for a missing menu, exit, validation or edge "
+                            "case. Run a real check with @run if the program can be "
+                            "tested non-interactively. If something is missing or wrong, "
+                            "fix it with @write and verify again. If it is truly complete, "
+                            "reply with @done."
+                        ),
+                    }
+                )
+                continue
             return finish("done")
 
         key = (directive.name, directive.arg, directive.body)
@@ -534,7 +721,7 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
                 repeated = f"@{directive.name} {directive.arg}".strip()
                 log(
                     ui.c(
-                        f"  ! bucle detenido: el modelo repitió {repeated[:80]}",
+                        f"  ! loop stopped: the model repeated {repeated[:80]}",
                         ui.YELLOW,
                     )
                 )
@@ -543,17 +730,33 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
                 {
                     "role": "user",
                     "content": (
-                        f"Ya ejecutaste @{directive.name} {directive.arg}. "
-                        "El resultado anterior está en la conversación: úsalo y continúa "
-                        "con un paso distinto o termina con @done. No repitas la directiva."
+                        f"You already ran @{directive.name} {directive.arg}. "
+                        "The previous result is in the conversation: use it and continue "
+                        "with a different step or finish with @done. Do not repeat the directive."
                     ),
                 }
             )
             continue
         seen.add(key)
 
-        log(ui.c(f"  -> @{directive.name} {directive.arg}".rstrip(), ui.DIM))
-        if directive.name == "agent":
+        log(
+            "  "
+            + ui.c("->", ui.MAGENTA)
+            + " "
+            + ui.c("@" + directive.name, ui.BOLD, ui.CYAN)
+            + ((" " + ui.c(directive.arg, ui.DIM)) if directive.arg else "")
+        )
+        check = ""
+        if directive.name == "skills":
+            ids = directive.arg.replace(",", " ").split()
+            try:
+                if not ids:
+                    raise skills.SkillError("missing skill id")
+                added = [skills.set_enabled(turn_cfg, item, True).id for item in ids]
+                result = "active skills: " + ", ".join(added)
+            except skills.SkillError as exc:
+                result = f"ERROR: {exc}"
+        elif directive.name == "agent":
             record = {"task": directive.arg, "created": time.strftime("%Y-%m-%d %H:%M:%S")}
             result = truncate(
                 run_subagent(
@@ -564,37 +767,66 @@ def run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
             session.setdefault("subagents", []).append(record)
         elif directive.name == "write" and not write_ok:
             result = (
-                "ERROR: el usuario no ha pedido modificar ficheros. "
-                "Responde con la información en texto y termina con @done."
+                "ERROR: the user did not ask to modify files. "
+                "Answer with the information in text and finish with @done."
             )
         else:
             if directive.name == "run":
                 explanation = directive_explanation(text, "run")
                 tools.confirm_reason = explanation or (
-                    "Burton no explicó el motivo. Tarea original: "
+                    "Burton did not explain why. Original task: "
                     + request_text[:400]
                 )
             else:
                 tools.confirm_reason = request_text
-            result = tools.execute(directive)
+            indicator = None
+            if directive.name == "run":
+                indicator = ui.ThinkingIndicator("running command", delay=0.3)
+                indicator.start()
+            try:
+                result = tools.execute(directive)
+            finally:
+                if indicator is not None:
+                    indicator.stop()
+            if directive.name == "write" and not result.startswith("ERROR"):
+                file_created = True
+                file_creation_retry = True
+                if directive.arg.lower().endswith(".py"):
+                    written_python.append(directive.arg)
+            elif directive.name == "run" and not result.startswith("ERROR"):
+                model_ran = True
 
         if result.startswith("ERROR"):
             log(ui.c(f"     {result}", ui.RED))
         elif directive.name == "run":
             for line in result.splitlines()[:40]:
-                log(f"     {line}")
-        elif directive.name in ("write", "agent"):
+                color = ui.GREEN if line.strip() == "exit 0" else None
+                log(ui.c(f"     {line}", color) if color else f"     {line}")
+        elif directive.name == "write":
+            for line in result.splitlines()[:20]:
+                log(ui.c(f"     {line}", ui.GREEN))
+        elif directive.name == "skills":
+            for line in result.splitlines()[:20]:
+                log(ui.c(f"     {line}", ui.CYAN))
+        elif directive.name == "agent":
             for line in result.splitlines()[:20]:
                 log(ui.c(f"     {line}", ui.DIM))
 
-        feedback = f"Resultado de @{directive.name} {directive.arg}:\n{result}"
+        if (
+            directive.name == "write"
+            and not result.startswith("ERROR")
+            and directive.arg.lower().endswith(".py")
+        ):
+            check = "\nAuto syntax check:\n" + syntax_check(directive.arg)
+
+        feedback = f"Result of @{directive.name} {directive.arg}:\n{result}{check}"
         if len(directives) > 1:
             ignored = len(directives) - 1
             feedback += (
-                f"\n\nHe ignorado {ignored} directiva(s) más de ese mensaje: "
-                "escribe una sola directiva por respuesta y espera el resultado."
+                f"\n\nI ignored {ignored} more directive(s) from that message: "
+                "write one directive per response and wait for the result."
             )
         messages.append({"role": "user", "content": feedback})
 
-    log(ui.c(f"  ! límite de {cfg['max_steps']} pasos", ui.YELLOW))
+    log(ui.c(f"  ! limit of {cfg['max_steps']} steps", ui.YELLOW))
     return finish("max_steps")

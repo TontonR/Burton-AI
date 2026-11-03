@@ -3,6 +3,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 
 ENABLED = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 if ENABLED and os.name == "nt":
@@ -42,7 +43,9 @@ def glyph(unicode_char, ascii_fallback):
 
 
 class ThinkingIndicator:
-    def __init__(self):
+    def __init__(self, label="thinking", delay=0.0):
+        self.label = label
+        self.delay = delay
         self._stop_event = threading.Event()
         self._thread = None
 
@@ -65,11 +68,20 @@ class ThinkingIndicator:
         self._thread = None
 
     def _animate(self):
+        if self.delay:
+            self._stop_event.wait(self.delay)
         frames = "|/-\\"
         index = 0
+        started = time.monotonic()
         while not self._stop_event.is_set():
+            elapsed = time.monotonic() - started
+            timer = c(f" {elapsed:.1f}s", YELLOW) if elapsed >= 0.5 else ""
             sys.stdout.write(
-                f"\r  {frames[index % len(frames)]} Burton pensando..."
+                "\r\033[2K  "
+                + c(frames[index % len(frames)], CYAN)
+                + " "
+                + c(self.label, DIM)
+                + timer
             )
             sys.stdout.flush()
             index += 1
@@ -83,7 +95,7 @@ LINK_MD = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 
 
 class Markdown:
-    """Pinta markdown básico línea a línea mientras llega el stream."""
+    """Render basic markdown line by line as the stream arrives."""
 
     def __init__(self):
         self.pending = ""
@@ -106,14 +118,21 @@ class Markdown:
 
     def emit(self, line):
         stripped = line.lstrip()
-        # Las directivas las resume el agente; el cuerpo de @write es ruido.
         if stripped.startswith("@write"):
             self.writing = True
+            path = stripped[6:].strip()
+            print(
+                c("  " + glyph("✎", "~") + " writing ", CYAN) + c(path, BOLD),
+                flush=True,
+            )
             return
         if stripped.startswith("@endwrite"):
             self.writing = False
             return
-        if self.writing or stripped.startswith("@"):
+        if self.writing:
+            print(c("    " + line, GREEN), flush=True)
+            return
+        if stripped.startswith("@"):
             return
         print(self.render(line), flush=True)
 
@@ -150,10 +169,10 @@ def banner(model, root, plan):
         c(bottom, MAGENTA),
     ]
     if plan:
-        lines.append(c("  modo plan: solo lectura", YELLOW))
+        lines.append(c("  plan mode: read-only", YELLOW))
     lines.append(
         c(
-            "  /help  /plan  /models  /sessions  /new  /exit",
+            "  /help  /plan  /models  /sessions  /skills  /new  /exit",
             DIM,
         )
     )

@@ -135,6 +135,13 @@ class BridgeTest(unittest.TestCase):
         self.assertFalse(payload["busy"])
         self.assertFalse(payload["thinking"])
 
+    def test_visible_response_handles_fused_write_markers(self):
+        text = (
+            "@write a.py\nsecret\n@endwrite@write b.py\nmore\n@endwrite\n"
+            "Terminado.\n@done"
+        )
+        self.assertEqual(bridge.visible_response(text), "Terminado.")
+
     def test_visible_response_hides_agent_directives_and_write_body(self):
         text = (
             "Voy a revisar el archivo.\n"

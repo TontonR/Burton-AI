@@ -2,6 +2,7 @@ import hashlib
 import errno
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -54,7 +55,7 @@ def acquire_state_lock(root):
         thread_lock = _state_locks.setdefault(key, threading.Lock())
     deadline = time.monotonic() + 10
     if not thread_lock.acquire(timeout=10):
-        raise TimeoutError("Tiempo agotado esperando el bloqueo local del estado.")
+        raise TimeoutError("Timed out waiting for the local state lock.")
     handle = None
     while True:
         try:
@@ -76,7 +77,7 @@ def acquire_state_lock(root):
                         raise
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
-                            "Tiempo agotado esperando el bloqueo del estado."
+                            "Timed out waiting for the state lock."
                         ) from exc
                     time.sleep(0.01)
         except OSError as exc:
@@ -175,7 +176,7 @@ def status_payload(root, state=None):
     is_busy = busy_state(root, current)
     if current.get("status") in ACTIVE_STATUSES and not is_busy:
         current["status"] = "stale"
-        current["error"] = current.get("error") or "El proceso no actualiza su estado."
+        current["error"] = current.get("error") or "The process is not updating its state."
     current["thinking"] = current.get("status") in {"queued", "thinking"}
     current["busy"] = is_busy
     current["cancel_requested"] = paths["cancel"].exists()
@@ -235,17 +236,9 @@ def consume_approval(root, request_id):
 
 
 def visible_response(text):
-    visible = []
-    writing = False
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("@write"):
-            writing = True
-            continue
-        if stripped.startswith("@endwrite"):
-            writing = False
-            continue
-        if writing or stripped.startswith("@"):
-            continue
-        visible.append(line)
-    return "\n".join(visible).strip()
+    text = re.sub(r"\n*@write\b.*?@endwrite\n*", "\n", text, flags=re.DOTALL)
+    text = re.sub(r"\n*@write\b.*", "", text, flags=re.DOTALL)
+    lines = [
+        line for line in text.splitlines() if not line.lstrip().startswith("@")
+    ]
+    return "\n".join(lines).strip()

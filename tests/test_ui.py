@@ -42,14 +42,16 @@ class MarkdownTest(unittest.TestCase):
     def test_partial_line_flushed(self):
         self.assertEqual(self.render("sin salto"), "sin salto\n")
 
-    def test_directives_and_write_body_hidden(self):
+    def test_directives_hidden_and_write_body_streamed(self):
         out = self.render(
             "Hola\n@read a.txt\n@write a.txt\nsecreto\n@endwrite\nAdiós\n"
         )
         self.assertIn("Hola", out)
         self.assertIn("Adiós", out)
+        self.assertIn("writing a.txt", out)
+        self.assertIn("secreto", out)
         self.assertNotIn("@read", out)
-        self.assertNotIn("secreto", out)
+        self.assertNotIn("@write", out)
 
 
 class BindingTest(unittest.TestCase):

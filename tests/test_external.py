@@ -47,7 +47,7 @@ class ExternalWorkerTest(unittest.TestCase):
         self.assertEqual(state["status"], "queued")
         self.assertNotIn("pid", state)
         self.assertIsNone(duplicate)
-        self.assertIn("ocupado", duplicate_error)
+        self.assertIn("busy", duplicate_error)
         self.assertEqual(start.call_count, 1)
 
     def test_worker_persists_response_and_session(self):
@@ -67,7 +67,7 @@ class ExternalWorkerTest(unittest.TestCase):
         }
         bridge.write_state(self.root, state)
 
-        def fake_run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None):
+        def fake_run_turn(session, cfg, tools, on_chunk, log=print, cancel_event=None, **_kwargs):
             text = "Hola, agente."
             session["messages"].append({"role": "assistant", "content": text})
             on_chunk(text)

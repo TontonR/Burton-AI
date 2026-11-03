@@ -1,59 +1,91 @@
 # burton_ai
 
-Agente de código mínimo sobre Ollama. Solo necesita Python 3.12+ y `prompt_toolkit` para la consola interactiva.
+A minimal local coding agent on top of Ollama. It only needs Python 3.12+ and `prompt_toolkit` for the interactive console.
 
-La idea es no repetir el problema de las herramientas grandes: prompt de ~200 tokens, sin JSON de herramientas y con streaming. El modelo responde con directivas de texto, el programa las ejecuta y le devuelve el resultado hasta que escribe `@done`.
+The model replies with text directives; the program executes them and feeds the real result back until the model writes `@done`. No tool-call JSON, no huge prompt.
 
-## Instalación
+## Install
 
 ```powershell
 python -m pip install -r requirements.txt
+ollama pull qwen2.5-coder:7b
 ```
 
-Requiere Ollama arrancado (o lo arranca solo) y un modelo descargado:
+Ollama must be running (Burton starts it if needed). If Ollama is missing: `winget install Ollama.Ollama`.
+
+## Usage
 
 ```powershell
-ollama pull qwen2.5-coder:14b
-```
-
-Si no está instalado: `winget install Ollama.Ollama` o `irm https://ollama.com/install.ps1 | iex`.
-
-## Uso
-
-```powershell
-# desde cualquier carpeta, para trabajar sobre esa carpeta
+# from the folder you want to work on
 burton
 
-# desde la carpeta del proyecto en el que quieras trabajar
-python C:\ruta\a\burton_ai\burton.py
+# explicit root and model
+python C:\path\to\burton_ai\burton.py --root C:\other\project --model qwen2.5-coder:7b
 
-# opciones
-burton --root C:\otro\proyecto --model qwen2.5-coder:14b --plan
-
-# automatización desde agentes (el turno corre en segundo plano)
-burton --talk "Revisa los tests y corrige el fallo"
+# automation from scripts or other agents
+burton --talk "Review the tests and fix the failure"
 burton --status
 burton --response
 burton --wait
 burton --stop
 ```
 
-El comando `burton` usa Python 3.12 y toma como raíz el directorio actual; también acepta `--root` para elegir otra carpeta. La interfaz externa mantiene una conversación por carpeta y permite enviar un turno, consultar el estado/respuesta, esperar, compactar y detener. `--status` devuelve JSON; `--response` devuelve texto parcial o final, y `--wait` espera a que termine. Si el mismo proyecto se controla desde otra carpeta, pasa siempre la misma ruta con `--root`. Si Windows no encuentra el comando en una terminal que ya estaba abierta, abre una nueva para que actualice el `PATH`.
+The project root is the directory you launch from, or `--root`. It is not persisted between runs.
 
-Operaciones externas disponibles: `--talk TEXTO`, `--response`, `--status`, `--wait [--timeout SEGUNDOS]`, `--compact`, `--stop`, `--new`, `--toggle-plan`, `--models [NOMBRE]`, `--sessions [ID|N]` y `--subagents [N]`. Para comandos que soliciten `@run`, `--status` muestra el comando y su motivo; responde con `--approve` o `--deny`. El worker no aprueba comandos por sí mismo.
+## Skills
 
-## Consola
+Skills are small Markdown files in `skills/`. The catalog ships with 6 core skills and 36 optional ones. Each one has a header:
 
-- Al escribir `/` aparece el autocompletado de comandos; Tab o Enter aceptan la sugerencia.
-- `/compact` resume los objetivos, restricciones, decisiones y siguientes pasos y sustituye el historial por ese resumen. No altera archivos.
-- Después de cada respuesta se muestra el número real de tokens de entrada que Ollama procesó y el porcentaje del contexto configurado; también se repite antes del siguiente mensaje.
-- Antes de ejecutar un comando, Burton enseña qué hará, el comando y la tarea que lo motiva; tú decides si permitirlo.
-- `Enter` envía. En la terminal integrada de VS Code, `Shift+Enter` y `Ctrl+J` insertan una línea nueva sin ocultar el panel.
-- `Ctrl+Backspace` borra la palabra anterior. `Ctrl+S` abre el menú de subagentes.
-- La respuesta se pinta como markdown básico: `**negrita**`, `` `código` ``, títulos con `#` y bloques de código con vallas de tres backticks.
-- Historial persistente con las flechas arriba/abajo.
+```markdown
+---
+id: python
+name: Python
+desc: modern Python, pathlib, types, venv
+tier: optional
+default: true
+priority: 12
+---
+# Python
+- ...
+```
 
-**Atajos en Windows Terminal**: la aplicación reconoce `Esc+Enter` como nueva línea y `Ctrl+W` como borrar palabra. Windows Terminal puede configurarlos en `settings.json` (dentro de `actions` unos ids, y sus teclas en `keybindings`):
+- `tier: core` skills are **always loaded** and cannot be disabled. They contain file access, directive discipline, safe editing, verification, style and safety.
+- `tier: optional` skills can be enabled or disabled.
+- `default: true` optional skills load out of the box.
+- `priority` controls prompt order.
+- Each skill is capped at 1200 characters. Optional skills share a 7000-character budget (`skills_budget`); if the budget is full, lower-priority skills are skipped and `/skills` marks them as `over budget`.
+
+The default active set is: `auto-skills`, `explore`, `clean-code`, `python`, `testing`, `spanish`, `self-review`, `terminal-apps`, `debugging`.
+
+`auto-skills` lets the model choose optional skills itself. The system prompt lists every optional skill with its id and description; the model sends `@skills id,id` before a task and those skills are loaded for the rest of that turn. Changes are per turn and are not written to `config.json`.
+
+`spanish` makes Burton reply to you in Spanish while it thinks, writes code, comments, filenames, commits and saved files in English. Disable it to let the model answer in the user's language.
+
+Commands:
+
+```text
+/skills                     list all skills and their state
+/skills on <id>             enable one or more ids
+/skills off <id>            disable one (core skills refuse)
+/skills only <id,id>        enable only these optional skills
+/skills                     with a TTY, opens a checkbox menu
+```
+
+Skill changes apply on the next turn; no restart. The external interface has `--skills` to list skills, `--skills default` to restore the defaults, `--skills on:ID` / `--skills off:ID` to toggle, and `--skills ID,ID` to keep only those optional skills.
+
+## Console
+
+- Typing `/` shows command autocomplete.
+- `Enter` sends. `Ctrl+J` inserts a new line.
+- A spinner shows while the model thinks and while a command runs, with elapsed time.
+- `@write` streams the whole file body as it is generated, so edits appear live.
+- `Ctrl+Backspace` deletes the previous word. `Ctrl+S` opens the subagent menu.
+- Responses render basic markdown: bold, inline code, headings and fenced code.
+- Persistent line history with the arrow keys.
+
+### Windows Terminal shortcuts
+
+Windows Terminal sends `Shift+Enter` as `Enter` and may send `Ctrl+Backspace` as `^W`. Add these ids inside `actions` and their keys inside `keybindings` in `settings.json`:
 
 ```json
 // actions
@@ -71,102 +103,108 @@ Operaciones externas disponibles: `--talk TEXTO`, `--response`, `--status`, `--w
 { "id": "User.sendInput.CtrlBackspace", "keys": "ctrl+backspace" }
 ```
 
-`\u001b\r` es Alt+Enter (nueva línea) y `\u0017` es Ctrl+W (borrar palabra). Abre una pestaña nueva después de guardar. `Alt+Enter` a secas abre pantalla completa en Windows Terminal.
+`\u001b\r` is Alt+Enter (new line) and `\u0017` is Ctrl+W (delete word). Open a new tab after saving.
 
-En la terminal integrada de VS Code o Cursor, `Shift+Enter` debe enviar `Esc+Enter` y `Ctrl+J` un salto de línea. Los atajos están en el archivo de preferencias del editor (`Preferences: Open Keyboard Shortcuts (JSON)`):
+## Directives
 
-```json
-{
-    "key": "shift+enter",
-    "command": "workbench.action.terminal.sendSequence",
-    "when": "terminalFocus",
-    "args": { "text": "\u001b\r" }
-},
-{
-    "key": "ctrl+j",
-    "command": "workbench.action.terminal.sendSequence",
-    "when": "terminalFocus",
-    "args": { "text": "\n" }
-},
-{
-    "key": "ctrl+backspace",
-    "command": "workbench.action.terminal.sendSequence",
-    "when": "terminalFocus",
-    "args": { "text": "\u0017" }
-}
-```
-
-## Directivas
-
-El modelo escribe, una por línea:
-
-```
-@ls <ruta>
-@read <ruta> [inicio-fin]
-@write <ruta>
-contenido completo del fichero
+```text
+@ls <path>
+@read <path> [start-end]
+@write <path>
+full file content
 @endwrite
-@run <comando>
-@agent <tarea>
+@run <command>
+@agent <task>
+@skills <id,id>
 @done
 ```
 
-- `@read` limita a 200 líneas por lectura; el resto se pide con rangos.
-- El programa ejecuta solo la **primera** directiva de cada respuesta y descarta las demás, para que el modelo vea el resultado de `@read` antes de escribir. Por eso el prompt le pide una directiva por turno.
-- `@write` reescribe el fichero entero. El contenido va tal cual entre `@write` y `@endwrite`, sin vallas, así puede contener bloques ``` sin romper el parser. Antes de sobrescribir guarda una copia en `backups/`.
-- `@run` ejecuta comandos en la carpeta del proyecto y pide confirmación antes de cada ejecución, mostrando el comando y la explicación de Burton. Timeout de 120 s.
-- `@agent <tarea>` lanza un subagente de **solo lectura** con contexto propio: investiga con `@ls`/`@read` y devuelve un resumen. El padre no se llena con los ficheros que explora. No puede escribir ni ejecutar. Cada subagente se guarda en la sesión y puedes revisarlo con `/subagents` o `Ctrl+S`.
-- Las rutas siempre se resuelven dentro del proyecto.
-- Por defecto no se puede sobrescribir el código `.py` de `burton_ai`; `--allow-self-edit` lo permite.
-- Peticiones claras como «hazme», «crea» o «implementa» autorizan a Burton a crear o editar archivos con `@write` sin pedir otro permiso. Las consultas, las instrucciones de solo lectura y las negaciones explícitas siguen bloqueadas.
-- Si el modelo repite una directiva, Burton no la ejecuta de nuevo: le recuerda el resultado anterior y le pide continuar. Si insiste otra vez, corta el bucle.
+- `@read` returns at most 200 lines; use a range for more.
+- Only the **first** directive of each response is executed, so the model sees its result before continuing.
+- `@write` replaces the whole file. The body is raw text between `@write` and `@endwrite`, without code fences, so it can contain its own Markdown fences. A backup is saved in `backups/` before overwriting.
+- `@run` runs without asking when the command stays inside the project and is not an installer or system change. Burton asks first for `pip`/`npm`/`winget`/`docker`/network commands, destructive commands and anything touching paths outside the project. The command has a 120 s timeout and no stdin, so interactive programs fail fast instead of hanging.
+- After every successful `@write` of a `.py` file, Burton automatically runs `python -m py_compile` and feeds the result back to the model.
+- Before `@done`, if a `.py` file was written and the model never ran anything, Burton asks for one self-review pass: re-read the request, check requirements, trace the behaviour and verify or fix it.
+- For explicit file-creation requests, generation is hidden. If the model returns a code block instead of `@write`, Burton can save it to a new file with an inferred name; it never overwrites an existing file this way.
+- `@agent` starts a read-only subagent with its own context. It can `@ls` and `@read`, not write or run. The parent receives a summary. Each subagent is saved in the session and can be reviewed with `/subagents` or `Ctrl+S`.
+- `@skills` loads optional skills for the rest of the current turn. It is only listed when the `auto-skills` skill is active. Unknown ids return an error and core ids are ignored.
+- Paths are always resolved inside the project root.
+- `burton_ai`'s own `.py` files are protected unless you pass `--allow-self-edit`.
+- If the model repeats a directive, Burton reminds it of the previous result and asks for a different step; a second repetition stops the loop.
 
-## Contexto
+## Context
 
-Cada petición incluye el árbol del proyecto (máximo 80 entradas y 3 niveles), los primeros 2000 caracteres de `AGENTS.md` y todas las habilidades de `skills/*.md` (hasta 4000 caracteres). Todo lo demás se pide con `@read`, así el prompt se mantiene pequeño.
+Every request includes:
 
-Las habilidades son instrucciones permanentes: leer ficheros, explorar, editar sin romper nada y estilo. Puedes añadir o editar `skills/*.md` y se cargan en el siguiente turno sin reiniciar.
+- the project tree (up to 80 entries, 3 levels),
+- the first 2000 characters of `AGENTS.md`,
+- the active skills, within the per-skill and total budget,
+- when `auto-skills` is active, the id and description of every optional skill, so the model can choose.
 
-Si solo saludas o conversas, responde en texto normal sin tocar ficheros.
+Everything else is requested with `@read`, so the prompt stays small. After each response Burton prints the real input token count reported by Ollama and the percentage of `num_ctx`.
 
-## Comandos
+## Commands
 
-| Comando | Qué hace |
+| Command | What it does |
 |---|---|
-| `/new` | Nueva conversación |
-| `/clear` | Alias de `/new` (también escribiendo `clear`) |
-| `/plan` | Alterna solo lectura: bloquea `@write` y `@run` |
-| `/models` | Lista y cambia de modelo; no hace falta reiniciar Ollama |
-| `/sessions` | Lista sesiones; `/sessions N` carga una |
-| `/subagents` | Lista los subagentes de la sesión; `/subagents N` abre uno (o `Ctrl+S`) |
-| `/help` | Ayuda |
-| `/exit` | Salir |
+| `/new` | New conversation |
+| `/clear` | Alias of `/new` (also `clear`) |
+| `/plan` | Toggle read-only mode: blocks `@write` and `@run` |
+| `/models` | List and switch model without restarting |
+| `/sessions` | List sessions; `/sessions N` loads one |
+| `/skills` | List skills; `/skills on\|off\|only <id>` toggles them |
+| `/subagents` | List session subagents; `/subagents N` opens one |
+| `/compact` | Summarise history into working memory |
+| `/help` | Help |
+| `/exit` | Quit |
 
-## Estado
+## External interface
 
-Todo vive en esta carpeta:
+Each operation is a separate invocation with the same `--root`:
 
-- `config.json`: modelo, `num_ctx`, pasos máximos y `num_predict` (límite de generación; `-1` permite generación sin límite de tokens). El contexto configurado es un límite del agente, no un límite fijo de Ollama; aumentarlo consume más memoria.
-- `skills/`: instrucciones permanentes que se cargan en cada turno.
-- `sessions/`: historial JSON, autoguardado tras cada turno.
-- `backups/`: copias antes de sobrescribir.
-- `history`: historial de líneas de la consola.
+```powershell
+burton --root C:\project --talk "Fix the failing test"
+burton --root C:\project --status
+burton --root C:\project --response
+burton --root C:\project --wait --timeout 120
+```
 
-## Configuración
+- `--talk TEXT` starts a background turn and returns JSON with its id.
+- `--status` returns JSON state, pending approval and whether it is thinking.
+- `--response` returns the text available so far.
+- `--wait` waits for the final response.
+- `--stop` cancels the active turn.
+- `--compact` compacts the external conversation.
+- `--approve` / `--deny` resolves a pending `@run`.
+- `--new`, `--toggle-plan`, `--models [NAME]`, `--sessions [ID|N]`, `--skills [default|on:ID|off:ID|ID,ID]`, `--subagents [N]`.
 
-`config.json`:
+Burton never runs a model-requested command without approval. Review the command and its reason before `--approve`.
+
+## Local state
+
+- `config.json`: model, `num_ctx`, `max_steps`, `temperature`, `num_predict`, `skills_budget`, and the selected optional skills.
+- `skills/`: skill files.
+- `sessions/`: JSON history, saved after every turn.
+- `backups/`: copies before overwriting.
+- `history`: console line history.
+- `control/`: state of external workers.
+
+Do not publish these files: they can contain project data and conversation history.
+
+## Configuration
 
 ```json
 {
-  "model": "qwen2.5-coder:14b",
+  "model": "qwen2.5-coder:7b",
   "num_ctx": 16384,
   "max_steps": 12,
   "temperature": 0,
-  "num_predict": -1
+  "num_predict": -1,
+  "skills_budget": 7000
 }
 ```
 
-En equipos con 8 GB de VRAM, `qwen2.5-coder:14b` puede necesitar descarga parcial a RAM en Q4 y ser más lento; `qwen2.5-coder:7b` usa menos memoria y `qwen2.5-coder:3b` suele ser más rápido, aunque puede equivocarse más. Ollama decide automáticamente cuánto cargar en GPU y RAM; no es conveniente forzar a llenar ambas. El contexto grande también aumenta el uso de memoria. Si Ollama informa de falta de memoria o el sistema se vuelve lento, baja `num_ctx` o cambia a un modelo menor.
+`qwen2.5-coder:7b` is the recommended default: it is much faster than 14B and good enough for this loop. On 8 GB of VRAM, 14B may spill into RAM and slow down. A larger `num_ctx` also uses more memory; lower it if Ollama reports memory errors.
 
 ## Tests
 
@@ -174,4 +212,4 @@ En equipos con 8 GB de VRAM, `qwen2.5-coder:14b` puede necesitar descarga parcia
 python -m unittest discover -s tests -v
 ```
 
-Cubren el parser de directivas, el sandbox de rutas, el modo plan, las copias de seguridad, el autocompletado, el render de markdown, `Ctrl+Backspace` y los subagentes.
+They cover directive parsing, path sandboxing, plan mode, backups, autocomplete, markdown rendering, `Ctrl+Backspace`, subagents, skills and the external worker.

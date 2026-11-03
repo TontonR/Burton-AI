@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import store
-from tools import Directive, Tools, parse_directives
+from tools import Directive, Tools, parse_directives, requires_confirmation
 
 
 class ParseTest(unittest.TestCase):
@@ -76,7 +76,7 @@ class ToolsTest(unittest.TestCase):
 
     def test_write_and_read(self):
         out = self.write("sub/a.txt", "uno\ndos")
-        self.assertIn("escrito sub/a.txt", out)
+        self.assertIn("wrote sub/a.txt", out)
         read = self.tools.execute(Directive("read", "sub/a.txt"))
         self.assertIn("1| uno", read)
         self.assertIn("2| dos", read)
@@ -98,27 +98,27 @@ class ToolsTest(unittest.TestCase):
     def test_self_edit_blocked(self):
         app = Tools(Path(__file__).resolve().parent.parent)
         out = app.execute(Directive("write", "agent.py", "x"))
-        self.assertIn("código de burton_ai", out)
+        self.assertIn("burton_ai code", out)
 
     def test_sandbox_rejects_outside(self):
         out = self.tools.execute(Directive("read", "../secreto.txt"))
-        self.assertTrue(out.startswith("ERROR: ruta fuera"))
+        self.assertTrue(out.startswith("ERROR: path outside"))
 
     def test_plan_blocks_write_and_run(self):
         self.tools.plan = True
-        self.assertIn("modo plan", self.write("a.txt", "x"))
-        self.assertIn("modo plan", self.tools.execute(Directive("run", "echo hola")))
+        self.assertIn("plan mode", self.write("a.txt", "x"))
+        self.assertIn("plan mode", self.tools.execute(Directive("run", "echo hola")))
 
     def test_empty_write(self):
         self.assertTrue(self.write("a.txt", "  ").startswith("ERROR"))
 
     def test_same_content_is_noop(self):
         self.write("a.txt", "uno")
-        self.assertIn("sin cambios", self.write("a.txt", "uno"))
+        self.assertIn("unchanged", self.write("a.txt", "uno"))
 
     def test_unknown_directive(self):
         out = self.tools.execute(Directive("delete", "a.txt"))
-        self.assertIn("desconocida", out)
+        self.assertIn("unknown", out)
 
     def test_backup_on_overwrite(self):
         self.write("a.txt", "v1")
@@ -139,8 +139,8 @@ class ToolsTest(unittest.TestCase):
 
     def test_run_respects_confirmation(self):
         tools = Tools(self.root, confirm=lambda cmd, reason: False)
-        out = tools.execute(Directive("run", "echo hola"))
-        self.assertIn("cancelado", out)
+        out = tools.execute(Directive("run", "npm install left-pad"))
+        self.assertIn("cancelled", out)
 
     def test_run_passes_task_context_to_permission_prompt(self):
         calls = []
@@ -149,10 +149,33 @@ class ToolsTest(unittest.TestCase):
             confirm=lambda cmd, reason: calls.append((cmd, reason)) or False,
         )
         tools.confirm_reason = "comprueba los tests"
-        tools.execute(Directive("run", "python -m unittest"))
+        tools.execute(Directive("run", "pip install requests"))
         self.assertEqual(
-            calls, [("python -m unittest", "comprueba los tests")]
+            calls, [("pip install requests", "comprueba los tests")]
         )
+
+    def test_command_policy_skips_safe_project_commands(self):
+        for command in (
+            "python game.py",
+            "python -m unittest",
+            "pytest -q",
+            "git status",
+            "git commit -m fix",
+            "echo hola",
+        ):
+            self.assertFalse(requires_confirmation(command, self.root), command)
+
+    def test_command_policy_confirms_install_system_and_outside_paths(self):
+        for command in (
+            "npm install left-pad",
+            "pip install requests",
+            "winget install Ollama.Ollama",
+            "del /s *",
+            "rm -rf build",
+            "python ..\\outside.py",
+            "python C:\\Windows\\system32\\calc.exe",
+        ):
+            self.assertTrue(requires_confirmation(command, self.root), command)
 
 
 if __name__ == "__main__":

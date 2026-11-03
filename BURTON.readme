@@ -1,57 +1,72 @@
 # Burton AI
 
-Burton es un agente de codigo local para proyectos. Usa Python, Ollama y un modelo que se ejecuta en tu equipo. Puede inspeccionar y editar archivos, ejecutar pruebas con permiso y mantener el historial de cada conversacion.
+Burton is a local coding agent for projects. It uses Python, Ollama and a model that runs on your machine. It can inspect and edit files, run tests and commands, and keep a conversation history.
 
-## Requisitos
+## Requirements
 
-- Windows y Python 3.12 o posterior.
-- Ollama instalado y en ejecucion.
-- Un modelo descargado en Ollama. El predeterminado es `qwen2.5-coder:14b`; puedes cambiarlo con `--model` o `/models`.
+- Windows and Python 3.12 or newer.
+- Ollama installed and running.
+- A model downloaded in Ollama. The default is `qwen2.5-coder:7b`; change it with `--model` or `/models`.
 
-## Instalacion y uso interactivo
+## Install and interactive use
 
-Desde la carpeta del proyecto Burton:
+From the Burton folder:
 
 ```powershell
 py -3.12 -m pip install -r requirements.txt
-ollama pull qwen2.5-coder:14b
+ollama pull qwen2.5-coder:7b
 py -3.12 .\burton.py --root .
 ```
 
-La carpeta indicada por `--root` es el proyecto sobre el que trabajara el agente. Si omites `--root`, usa la carpeta actual. Para abrir Burton desde cualquier directorio, invoca `burton.py` con su ruta completa y pasa la carpeta de trabajo en `--root`.
+`--root` is the project the agent works on. If omitted, Burton uses the current folder. To launch Burton from anywhere, call `burton.py` with its full path and pass the working folder in `--root`.
 
-## Interfaz externa
+## Skills
 
-La interfaz externa permite enviar una tarea y consultar el mismo worker desde scripts u otros agentes. Ejecuta cada opcion en una invocacion separada y conserva la misma ruta de `--root`:
+Skills live in `skills/*.md`. `core` skills are always active and cannot be disabled; `optional` skills can be toggled:
 
-```powershell
-py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --talk "Revisa los tests y corrige el fallo"
-py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --status
-py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --response
-py -3.12 C:\ruta\a\burton_ai\burton.py --root C:\ruta\del\proyecto --wait --timeout 120
+```text
+/skills
+/skills on git
+/skills off python
+/skills only git,testing
 ```
 
-- `--talk TEXTO` inicia el turno en segundo plano y devuelve JSON con su identificador.
-- `--status` devuelve JSON con el estado, el permiso pendiente y si el agente esta pensando.
-- `--response` devuelve el texto disponible hasta ese momento.
-- `--wait` espera a que acabe y devuelve la respuesta final; `--timeout` limita la espera.
-- `--stop` solicita detener el turno activo.
-- `--compact` resume el historial de la conversacion externa.
-- `--approve` o `--deny` resuelve un permiso pendiente solicitado por `@run`.
-- `--new` crea una sesion externa; `--toggle-plan` alterna el modo de solo lectura.
-- `--models [NOMBRE]`, `--sessions [ID|NUMERO]` y `--subagents [NUMERO]` consultan o seleccionan esos recursos.
+Changes apply on the next turn. Default optional skills are `auto-skills`, `explore`, `clean-code`, `python`, `testing`, `spanish`, `self-review`, `terminal-apps` and `debugging`. The `auto-skills` skill is active by default: it lists the optional skills in the prompt and lets the model load what it needs with `@skills id,id` for that turn only. The `spanish` skill makes Burton speak Spanish while code, comments, filenames, documentation and saved files stay in English.
 
-El agente no ejecuta comandos solicitados por el modelo sin aprobacion. Revisa el comando y su motivo antes de usar `--approve`.
+Each skill is capped at 1200 characters and optional skills share a 7000-character budget. If the budget is full, lower-priority skills are skipped; `/skills` marks them as `over budget`.
 
-## Seguridad y datos locales
+## External interface
 
-Las directivas del modelo se limitan a la carpeta de trabajo. `@write` crea una copia de seguridad antes de reemplazar un archivo; la edicion del propio Burton esta bloqueada por defecto. Aun asi, revisa los cambios y los comandos antes de aprobarlos: un modelo local puede generar codigo incorrecto.
+The external interface sends a task to the same worker from scripts or other agents. Use one operation per invocation and keep the same `--root`:
 
-La configuracion, sesiones, copias de seguridad, historial de terminal y estado del worker son datos locales y no deben publicarse.
+```powershell
+py -3.12 C:\path\to\burton_ai\burton.py --root C:\path\to\project --talk "Review the tests and fix the failure"
+py -3.12 C:\path\to\burton_ai\burton.py --root C:\path\to\project --status
+py -3.12 C:\path\to\burton_ai\burton.py --root C:\path\to\project --response
+py -3.12 C:\path\to\burton_ai\burton.py --root C:\path\to\project --wait --timeout 120
+```
 
-## Pruebas
+- `--talk TEXT` starts the turn in the background and returns JSON with its id.
+- `--status` returns JSON state, pending approval and whether the agent is thinking.
+- `--response` returns the text available so far.
+- `--wait` waits for the end and returns the final response; `--timeout` limits the wait.
+- `--stop` requests cancelling the active turn.
+- `--compact` compacts the external conversation.
+- `--approve` or `--deny` resolves a pending `@run` permission.
+- `--new` creates an external session; `--toggle-plan` toggles read-only mode.
+- `--models [NAME]`, `--sessions [ID|NUMBER]`, `--skills [default|on:ID|off:ID|ID,ID]` and `--subagents [NUMBER]` inspect or select those resources.
 
-Desde la carpeta de Burton:
+The agent never runs an outside/project or system command without approval. Inside-project commands run directly. Review the command and its reason before using `--approve`.
+
+## Safety and local data
+
+Model directives are confined to the working folder. `@write` saves a backup before replacing a file; editing Burton's own code is blocked by default. Still, review changes and commands before approving them: a local model can generate incorrect code.
+
+Configuration, sessions, backups, terminal history and worker state are local data and should not be published.
+
+## Tests
+
+From the Burton folder:
 
 ```powershell
 py -3.12 -m unittest discover -s tests -v

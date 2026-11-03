@@ -8,11 +8,12 @@ SESSIONS_DIR = BASE / "sessions"
 BACKUPS_DIR = BASE / "backups"
 
 DEFAULTS = {
-    "model": "qwen2.5-coder:14b",
+    "model": "qwen2.5-coder:7b",
     "num_ctx": 16384,
     "max_steps": 12,
     "temperature": 0,
     "num_predict": -1,
+    "skills_budget": 7000,
 }
 
 
@@ -22,7 +23,7 @@ def load_config():
         try:
             cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
         except (OSError, ValueError):
-            print("aviso: config.json ilegible, uso valores por defecto")
+            print("warning: config.json is unreadable, using defaults")
     return cfg
 
 
